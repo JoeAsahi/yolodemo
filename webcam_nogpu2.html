@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>YOLO+ONNX Runtime Demo(webcam)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+</head>
+
+<body>
+    <div>W<input type="number" id="inputWidth" value="5000"><span id="fps"></span></div>
+    <div>H<input type="number" id="inputHeight" value="5000"><button id="button" disabled>START</button></div>
+    <canvas id="viewCanvas" style="border:solid; width:100%; height:auto;"></canvas>
+    <canvas id="dataCanvas" style="display:none;"></canvas>
+
+    <script>
+        let session;
+        let src;
+        let srcWidth;
+        let srcHeight;
+        let lastTime;
+
+        function writeMsg(text) {
+            const msg = document.createElement('p');
+            msg.textContent = text;
+            document.body.appendChild(msg);
+        }
+
+        async function process(timestamp) {
+            try {
+                if (lastTime) {
+                    const delta = timestamp - lastTime;
+                    const fps = 1000 / delta;
+                    document.getElementById("fps").innerText = `FPS:${fps.toFixed(1)}`;
+                }
+                lastTime = timestamp;
+
+                // YOLOに渡すデータ用のcanvas
+                const dataCanvas = document.getElementById("dataCanvas");
+                dataCanvas.width = dataCanvas.height = 640;
+                const dataCtx = dataCanvas.getContext("2d");
+
+                // 長辺が640pxになるように補正
+                const max = Math.max(srcWidth, srcHeight);
+                const scale = 640 / max;
+                const drawWidth = Math.trunc(srcWidth * scale);
+                const drawHeight = Math.trunc(srcHeight * scale);
+
+                dataCtx.drawImage(src, 0, 0, drawWidth, drawHeight);
+                const imageData = dataCtx.getImageData(0, 0, dataCanvas.width, dataCanvas.height).data;
+
+                // RGBA,RGBA...形式をRRR,GGG,BBB形式に変換
+                const r = [], g = [], b = [];
+                for (let i = 0; i < imageData.length; i += 4) {
+                    r.push(imageData[i] / 255.0);
+                    g.push(imageData[i + 1] / 255.0);
+                    b.push(imageData[i + 2] / 255.0);
+                }
+                const images = new ort.Tensor('float32', [...r, ...g, ...b], [1, 3, dataCanvas.height, dataCanvas.width]);
+
+                // 推論実行
+                const results = await session.run({ images: images });
+
+                // 結果描画
+                const num = results.output0.dims[1];
+                const size = results.output0.dims[2];
+                const data = results.output0.data;
+                const viewCanvas = document.getElementById("viewCanvas");
+                viewCanvas.width = srcWidth;
+                viewCanvas.height = srcHeight;
+                const viewCtx = viewCanvas.getContext("2d");
+                viewCtx.lineWidth = 10;
+                viewCtx.strokeStyle = 'magenta';
+                // 画像をキャンバスに描画して直後にバウンディングボックスを描画する
+                viewCtx.drawImage(src, 0, 0);
+                for (let i = 0; i < num; i++) {
+                    const [x1, y1, x2, y2, score, classId] = data.slice(i * size, (i + 1) * size);
+                    if (score > 0) {
+                        // console.log(`classID=${classId} score=${score} x1=${x1} y1=${y1} x2=${x2} y2=${y2}`);
+                        const bx = x1 / scale;
+                        const by = y1 / scale;
+                        const bw = (x2 - x1) / scale;
+                        const bh = (y2 - y1) / scale;
+
+                        viewCtx.strokeRect(bx, by, bw, bh);
+                    }
+                }
+                requestAnimationFrame(process);
+            } catch (err) {
+                console.log(err);
+                requestAnimationFrame(process);
+            }
+        }
+
+        async function main() {
+            document.documentElement.requestFullscreen();
+            const inputWidth = parseInt(document.getElementById("inputWidth").value);
+            const inputHeight = parseInt(document.getElementById("inputHeight").value);
+            const video = document.createElement('video');
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: inputWidth }, height: { ideal: inputHeight } } });
+                video.srcObject = stream;
+
+                video.addEventListener("loadedmetadata", () => {
+                    src = video;
+                    srcWidth = video.videoWidth;
+                    srcHeight = video.videoHeight;
+                    writeMsg(`source=[${srcWidth}, ${srcHeight}]`);
+
+                    video.play();
+                    process();
+                });
+            } catch (err) {
+                writeMsg(`ERROR:${err}`);
+            }
+        }
+
+        async function init() {
+            try {
+                session = await ort.InferenceSession.create('yolo12n.onnx');
+                const button = document.getElementById('button');
+                button.onclick = main;
+                button.disabled = false;
+            } catch (err) {
+                writeMsg(`ERROR:${err}`);
+            }
+        }
+
+        init();
+    </script>
+</body>
+
+</html>
